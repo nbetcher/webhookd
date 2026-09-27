@@ -23,7 +23,7 @@
 | Queue | Per-hook config, admission and limits, retries and backoff, conditions, TTL and deadline, dedup, concurrency, rate limit, durability, crash recovery, drain on shutdown | Priority, `drop_oldest`, `wait_for: final`, `on_dead` chaining, NATS backend |
 | Configuration | Sidecar `<script>.hook.json`, global defaults file, shared `conditions.d/` sets. All file-based and edited by hand or through git. | Any API or UI editing of config or scripts |
 | Queue operations | **Viewing** queues, jobs, attempts, logs and the dead-letter queue | Cancel, requeue, snooze, pause, drain, purge and replay through the API |
-| Notifications | The existing per-job notifier, plus app-level events (queue full, job dead, script not executable, and so on). Configured by file in `notify.d/`. | UI rule editing, digests beyond simple throttling |
+| Notifications | The existing per-job notifier, unchanged. It fires once per job, when the job reaches a final state. | App-level notifications (queue full, retries exhausted, script not executable, …), channels, routing rules, notification API |
 | Observability | Metrics rollups, event stream, optional Prometheus text endpoint | SLAs, reports, maintenance windows, circuit breaker |
 | Security | A separate optional API listener, bcrypt basic auth, static read-only bearer tokens, CORS allowlist for the portal origin | Sessions and cookies, CSRF, RBAC roles, OIDC, audit log (not needed while the API has no writes) |
 | Portal | — | A separate repository built on the Neon Grid `web/nuxt` components with Vue 3 + Vite. See §9. |
@@ -69,13 +69,13 @@ No library covers the hard parts anyway:
 
 | Dependency | Use | Binary Δ |
 |---|---|---|
-| `go.etcd.io/bbolt` | Durable queue store and API data (metrics rollups, event and notification logs) | +0.9 MB |
+| `go.etcd.io/bbolt` | Durable queue store and API data (metrics rollups, event log) | +0.9 MB |
 | `cenkalti/backoff/v5` | Backoff with jitter and max elapsed time | ~0 |
 | `golang.org/x/time/rate` | Per-hook rate limit | ~0 |
 
 - Direct dependencies go from 2 to 5.
 - The binary goes from 8.2 MB to about 9.2 MB.
-- fsnotify is not needed; a polling watcher is enough (§6.2).
+- fsnotify is not needed; a polling watcher is enough (§7).
 
 ---
 
@@ -87,8 +87,8 @@ webhook ─► middleware (auth/sig/xff/cors, unchanged) ─► admission ─►
                                                           hook heap, rate gate            ▼
                                         Store: memory (default) | spool | bolt      Broker (per-job seq ring)
                                                                                           │
-          pkg/events bus ◄── scheduler, runner, watcher, notifier                         ├─► sync HTTP caller
-             ├─► notification router (notify.d)                                           └─► API log follow (SSE)
+          pkg/events bus ◄── scheduler, runner, watcher                                   ├─► sync HTTP caller
+                                                                                          └─► API log follow (SSE)
              ├─► metrics aggregator ─► 1m/1h/1d rollups
              └─► API SSE hub (/_api/v1/events)
 ```
@@ -102,9 +102,8 @@ webhook ─► middleware (auth/sig/xff/cors, unchanged) ─► admission ─►
 | `pkg/events` | Non-blocking event bus, 2k-event ring for SSE resume | 200 |
 | `pkg/watch` | Polling reconciler for scripts and config files | 200 |
 | `pkg/metrics` | Counters and histograms, rollups, Prometheus text output | 400 |
-| `pkg/notification` (extended) | Event router, throttle, quiet hours, Slack/ntfy/template formats | 450 |
 | `pkg/api/v1` | Read-only API, SSE, API auth, CORS, OpenAPI document | 1.1k |
-| **Total** | | **~4.8k Go** (+ ~3.5k of tests) |
+| **Total** | | **~4.35k Go** (+ ~3.2k of tests) |
 
 **Dispatch**
 - Enqueue signals a `chan struct{}`, and one timer handles the next due retry. Nothing polls.
@@ -164,7 +163,6 @@ webhook ─► middleware (auth/sig/xff/cors, unchanged) ─► admission ─►
     "retry":   {"exit_codes": [75], "on_timeout": true, "on_crash": false},
     "default": "fail"                                  // order: timeout → fail → success → retry → default
   },
-  "notify": {"on": ["final"]},
   "retention": {"completed": "24h", "dead": "168h"},
   "payload_policy": {"persist": true, "redact_headers": ["Authorization", "Cookie", "X-Hub-Signature-256"]}
 }
@@ -187,17 +185,9 @@ webhook ─► middleware (auth/sig/xff/cors, unchanged) ─► admission ─►
 
 ---
 
-## 5. App-level notifications (file-configured)
+## 5. Events
 
-- **Channels** are defined in `notify.d/channels.json`.
-  - They reuse the existing `http(s)://` and `mailto:` notifiers.
-  - `format=generic|slack|ntfy|template` sets the message format.
-  - Secrets are written as `${ENV}` placeholders.
-- **Rules** are defined in `notify.d/rules.json`.
-  - A rule matches on event types, minimum severity, hook glob and labels, and sends to one or more channels.
-  - Each rule has a throttle, for example 1 per 10 minutes per hook and event.
-  - Optional quiet hours; `critical` events bypass them.
-- **Legacy compatibility:** `-notification-uri` still works. It becomes the implicit channel `default`, with a rule on `job.final`.
+The event bus exists for the API's event stream (`/_api/v1/events`) and for metrics. It does not send anything anywhere. Outbound alerting on these events is tabled (§1).
 
 **Event catalogue**
 
@@ -211,7 +201,7 @@ webhook ─► middleware (auth/sig/xff/cors, unchanged) ─► admission ─►
 | `script.created`, `script.modified`, `script.deleted` | info |
 | `config.changed`, `config.invalid` | info / error |
 | `dedup.storm`, `rate.limited` | warning |
-| `disk.low`, `store.error`, `notifier.failed`, `eventbus.dropped` | critical / error |
+| `disk.low`, `store.error`, `eventbus.dropped` | critical / error |
 | `api.auth_failure` | warning |
 
 ---
@@ -247,7 +237,7 @@ webhook ─► middleware (auth/sig/xff/cors, unchanged) ─► admission ─►
 | Endpoint | Returns |
 |---|---|
 | `GET /info` | Version, uptime, enabled features, queue backend, worker count, API flags |
-| `GET /health` | Store status, free disk, scheduler lag, watcher last scan, event-bus drops, notifier errors, TLS certificate expiry |
+| `GET /health` | Store status, free disk, scheduler lag, watcher last scan, event-bus drops, TLS certificate expiry |
 | `GET /openapi.json` | API description |
 
 **Hooks**
@@ -283,14 +273,6 @@ webhook ─► middleware (auth/sig/xff/cors, unchanged) ─► admission ─►
 | `GET /conditions` | Shared sets, with a `used_by` list |
 | `GET /conditions/{name}` | One shared set |
 | `GET /conditions/{name}/evaluate?exit=&output=` | Evaluates a set against a supplied exit code and output (the output may also go in the request body with `Content-Type: text/plain`). It has no side effects, so it counts as a read. |
-
-**Notifications**
-
-| Endpoint | Returns |
-|---|---|
-| `GET /notifications/channels` | id, type, format, last delivery status. The URI is redacted to scheme and host. |
-| `GET /notifications/rules` | Routing rules |
-| `GET /notifications/log` | Delivery attempts: event, channel, status, error. Kept 30 days. |
 
 **Metrics**
 
@@ -331,7 +313,6 @@ webhook ─► middleware (auth/sig/xff/cors, unchanged) ─► admission ─►
 |---|---|
 | `metrics_1m`, `metrics_1h`, `metrics_1d` (per-hook counters plus a 16-bucket log histogram) | 48 h / 90 d / 2 y (~1–5 MB per 50 hooks) |
 | `events` (for `/events/recent` beyond the in-memory ring) | 7 d |
-| `notify_log` | 30 d |
 
 - Job records live in the queue store. With the `memory` backend, the job API shows only jobs since the last start.
 - A janitor enforces retention. Compaction is documented as `webhookd compact`.
@@ -342,17 +323,17 @@ webhook ─► middleware (auth/sig/xff/cors, unchanged) ─► admission ─►
 
 1. **Event bus.**
    - `Publish` never blocks. Each subscriber has a bounded channel and a drop counter.
-   - Subscribers: the notification router, the metrics aggregator, the SSE hub, and the event log.
+   - Subscribers: the metrics aggregator, the SSE hub, and the event log.
 2. **Watcher.**
-   - A polling reconciler (`-watch-interval=5s`) keeps a snapshot of mode, mtime, size and hash for `scripts/`, sidecars, `conditions.d/`, `notify.d/` and the token file.
+   - A polling reconciler (`-watch-interval=5s`) keeps a snapshot of mode, mtime, size and hash for `scripts/`, sidecars, `conditions.d/` and the token file.
    - The diff produces `script.*` and `config.*` events and invalidates the config cache.
    - No fsnotify dependency. Polling works on NFS and bind mounts.
 3. **Exec-bit check.**
    - `ResolveScript` checks the exec bit.
    - A missing bit returns `500 script not executable` plus `webhook.not_executable`, instead of the opaque exec error returned today.
-4. **Notifier interface.**
-   - A new optional `EventNotifier` interface is added. Existing `HookResult` notifiers are wrapped by an adapter.
-   - The HTTP notifier gains a client timeout and `text/template` bodies.
+4. **Existing notifier.**
+   - The `HookResult` notifier is unchanged apart from being called once per job, on its final state, instead of once per run. With `max_attempts: 1` that is identical to today.
+   - The notifier's prefix filter reads the final attempt's section of the log.
 5. **Metrics.**
    - An in-memory aggregator flushes once a minute in one bolt transaction. Coarser buckets are rolled up from finer ones.
    - The existing expvar counters stay.
@@ -365,7 +346,7 @@ webhook ─► middleware (auth/sig/xff/cors, unchanged) ─► admission ─►
 |---|---|---|
 | 1. Foundations | `Job.Run(ctx, Sink)`, broker, memory store, FIFO scheduler, append-mode logs, persistent IDs, `pkg/events` | None (FIFO only) |
 | 2. Per-hook config | `hookcfg` layers, `conditions.d`, limits/429, TTL/deadline, dedup, concurrency, rate, exec-bit check, watcher | Only for hooks with a sidecar |
-| 3. Retries and alerts | Conditions, backoff, dead state, `hook_attempt` env, notification router and rules, legacy URI adapter | Only when configured |
+| 3. Retries | Conditions, backoff, dead state, `hook_attempt` env, final-state notifier call | Only when configured |
 | 4. Durability | spool and bolt stores, crash recovery with orphan kill, drain on shutdown | Opt-in via `-queue-backend` |
 | 5. Read-only API | `/_api/v1` (all of §6), API listener, auth, CORS, SSE, metrics rollups, OpenAPI, Prometheus | Off unless `-api-addr` is set |
 
