@@ -137,7 +137,9 @@ webhook ─► middleware (auth/sig/xff/cors, unchanged) ─► admission ─►
 **Logs**
 - One file per job, opened with `O_APPEND`, with its path stored in the job record.
 - Lines are flushed one at a time, or tracked by offset, so `follow` never drops lines.
-- IDs are persistent and monotonic.
+- IDs are persistent and monotonic, so `GET /<hook>/<id>` never points at the wrong run after a restart. Where the counter comes from:
+  - With `-db-path` set, the counter is reserved in blocks through `sys/meta.id_hwm` (`STORAGE_SCHEMA.md` §6).
+  - With no database, it is seeded at startup from the highest ID found in the log directory's file names.
 
 **Compatibility**
 - With no sidecar and default flags, behaviour is the same as today, except that jobs now run FIFO.
