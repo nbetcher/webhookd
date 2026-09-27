@@ -23,10 +23,10 @@
 | Queue | Per-hook config, admission and limits, retries and backoff, conditions, TTL and deadline, dedup, concurrency, rate limit, durability, crash recovery, drain on shutdown | Priority, `drop_oldest`, `wait_for: final`, `on_dead` chaining, NATS backend |
 | Configuration | Sidecar `<script>.hook.json`, global defaults file, shared `conditions.d/` sets. All file-based and edited by hand or through git. | Any API or UI editing of config or scripts |
 | Queue operations | **Viewing** queues, jobs, attempts, logs and the dead-letter queue | Cancel, requeue, snooze, pause, drain, purge and replay through the API |
-| Notifications | The existing per-job notifier, unchanged. It fires once per job, when the job reaches a final state. | App-level notifications (queue full, retries exhausted, script not executable, …), channels, routing rules, notification API |
+| Notifications | The existing per-job notifier, unchanged. It fires once per job, when the job reaches a final state. **Alerting** (queue full, retries exhausted, script not executable, …; channels, rules, throttling). See `PORTAL_PROPOSAL.md` §4. |
 | Observability | Metrics rollups, event stream, optional Prometheus text endpoint | SLAs, reports, maintenance windows, circuit breaker |
 | Security | A separate optional API listener, bcrypt basic auth, static read-only bearer tokens, CORS allowlist for the portal origin | Sessions and cookies, CSRF, RBAC roles, OIDC, audit log (not needed while the API has no writes) |
-| Portal | — | A separate repository built on the Neon Grid `web/nuxt` components with Vue 3 + Vite. See §9. |
+| Portal | — | A separate repository built on the Neon Grid `web/nuxt` components with Vue 3 + Vite. See §9 and `PORTAL_PROPOSAL.md`. |
 
 ---
 
@@ -187,7 +187,7 @@ webhook ─► middleware (auth/sig/xff/cors, unchanged) ─► admission ─►
 
 ## 5. Events
 
-The event bus exists for the API's event stream (`/_api/v1/events`) and for metrics. It does not send anything anywhere. Outbound alerting on these events is tabled (§1).
+The event bus exists for the API's event stream (`/_api/v1/events`) and for metrics. It does not send anything anywhere. Outbound alerting on these events is tabled; see `PORTAL_PROPOSAL.md` §4 (Alerting). The event bus is the hook it will subscribe to.
 
 **Event catalogue**
 
@@ -272,7 +272,6 @@ The event bus exists for the API's event stream (`/_api/v1/events`) and for metr
 |---|---|
 | `GET /conditions` | Shared sets, with a `used_by` list |
 | `GET /conditions/{name}` | One shared set |
-| `GET /conditions/{name}/evaluate?exit=&output=` | Evaluates a set against a supplied exit code and output (the output may also go in the request body with `Content-Type: text/plain`). It has no side effects, so it counts as a read. |
 
 **Metrics**
 
@@ -354,15 +353,15 @@ Phases 1–4 are useful on their own. Phase 5 is what the separate portal projec
 
 ---
 
-## 9. Portal (tabled, separate project)
+## 9. Portal and alerting (tabled)
 
-- The portal lives in its own repository and consumes only `/_api/v1`. It has no build or runtime coupling with webhookd.
-- Recorded decisions for when it resumes:
-  - Neon Grid `web/nuxt` components ported to Vue 3 + Vite.
-  - CodeMirror 6 as the read-only code viewer.
-  - uPlot for charts.
-  - Static hosting, or any static file server.
-- Write features need a v2 of this API with RBAC, CSRF-safe auth and audit. They are a separate proposal: queue actions (cancel, requeue, snooze, pause, drain, purge, replay), config and script editing, SLAs, maintenance windows and circuit breaker.
+These are specified in [`PORTAL_PROPOSAL.md`](PORTAL_PROPOSAL.md). It covers:
+- the separate portal project and its web stack
+- the alerting engine, which runs inside webhookd on this proposal's event bus
+- the condition tester (`evaluate`), which moved from this API to `/_api/v2`
+- the `/_api/v2` write surface
+
+Nothing in this proposal depends on that one.
 
 ---
 
