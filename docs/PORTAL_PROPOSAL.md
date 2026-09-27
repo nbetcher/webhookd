@@ -174,7 +174,7 @@ The core events come from the queue/API proposal's catalogue. Rows marked with โ
   - A CSRF synchronizer token for cookie sessions.
   - Roles: viewer, operator and admin.
   - Step-up re-authentication for admin writes.
-- **Audit:** every mutation is recorded with actor, IP, target and a before/after diff. Records are kept for 365 days in bbolt.
+- **Audit:** every mutation is recorded with actor, IP, target and a before/after diff. Records are kept for 365 days in a new `audit/` bbolt domain (planned placement: `STORAGE_SCHEMA.md` ยง8).
 - **Config store:**
   - Portal edits are written to the files atomically: temp file, fsync, rename.
   - An ETag/If-Match check makes a stale write return 409.
@@ -185,7 +185,7 @@ The core events come from the queue/API proposal's catalogue. Rows marked with โ
   - Symlinks are refused, as is any path outside the scripts directory.
   - chmod is limited to `u+x`/`g+x`.
   - Every write raises a `script.modified` alert that cannot be muted.
-- **Queue actions:** requeue, cancel, snooze (`not_before`), replay (a new job linked by `replay_of`), and per-hook gates (`paused_until`, `draining`). Hook gates live in a bbolt `state` bucket, not in the config files.
+- **Queue actions:** requeue, cancel, snooze (`not_before`), replay (a new job linked by `replay_of`), and per-hook gates (`paused_until`, `draining`). Hook gates live in a new `ops/gates` bbolt bucket, not in the config files (`STORAGE_SCHEMA.md` ยง8).
 - **SLA evaluator:** runs every minute over the metric rollups and emits events.
 - **Estimated size in webhookd:** about 3k lines of Go on top of the queue/API work, plus alerting at about 450.
 

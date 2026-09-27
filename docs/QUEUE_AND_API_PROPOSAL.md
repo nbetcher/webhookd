@@ -69,7 +69,7 @@ No library covers the hard parts anyway:
 
 | Dependency | Use | Binary Δ |
 |---|---|---|
-| `go.etcd.io/bbolt` | Durable queue store and API data (metrics rollups, event log) | +0.9 MB |
+| `go.etcd.io/bbolt` v1.4.3 | Durable queue store and API data (metrics rollups, event log). Pinned to 1.4.x because 1.5 needs Go 1.25. Schema: [`STORAGE_SCHEMA.md`](STORAGE_SCHEMA.md). | +0.9 MB |
 | `cenkalti/backoff/v5` | Backoff with jitter and max elapsed time | ~0 |
 | `golang.org/x/time/rate` | Per-hook rate limit | ~0 |
 
@@ -109,7 +109,7 @@ webhook ─► middleware (auth/sig/xff/cors, unchanged) ─► admission ─►
 
 **Dispatch**
 - Enqueue signals a `chan struct{}`, and one timer handles the next due retry. Nothing polls.
-- Latency is under 1 ms with the memory store, and about 10 ms plus fsync with bolt `Batch`.
+- Latency is under 1 ms with the memory store, and about 2–4 ms with bolt (group commit through a single writer loop; see `STORAGE_SCHEMA.md` §6).
 - Each hook has its own FIFO. A heap of eligible hooks, with aging, picks the next one, so a hook at its concurrency cap never blocks others.
 
 **Job record**
@@ -178,11 +178,10 @@ webhook ─► middleware (auth/sig/xff/cors, unchanged) ─► admission ─►
 ### Global flags (`WHD_*` env equivalents)
 
 - `-queue-backend=memory|bolt`
-- `-queue-path`
 - `-queue-max-size`
 - `-queue-defaults`
 - `-queue-drain-timeout=30s`
-- `-queue-fsync=always|batch|off`
+- `-db-path`, `-db-fsync=always|group|off`, `-db-mmap`, `-db-cache-jobs`, `-db-compress-min` (see `STORAGE_SCHEMA.md` §10)
 - `-hook-workers` stays as the global concurrency limit.
 
 ---
@@ -308,15 +307,19 @@ The event bus exists for the API's event stream (`/_api/v1/events`) and for metr
 - **CORS (`-api-cors-origins`).** An explicit allowlist, for example the portal's origin. Only `GET`, `Authorization` and `Last-Event-ID` are allowed. Credentials use bearer tokens only, with no cookies, so CSRF does not apply.
 - **Hook auth is independent.** The existing hook-side auth, htpasswd and signature verification are unchanged and separate from API auth.
 
-### 6.4 Storage used by the API (bbolt `-api-db`, or inside the queue's bolt file)
+### 6.4 Storage used by the API
 
-| Bucket | Retention |
-|---|---|
-| `metrics_1m`, `metrics_1h`, `metrics_1d` (per-hook counters plus a 16-bucket log histogram) | 48 h / 90 d / 2 y (~1–5 MB per 50 hooks) |
-| `events` (for `/events/recent` beyond the in-memory ring) | 7 d |
+The full layout (buckets, keys, indexes, in-memory structures, write path and migrations) is in [`STORAGE_SCHEMA.md`](STORAGE_SCHEMA.md). Summary:
 
-- Job records live in the queue store. With the `memory` backend, the job API shows only jobs since the last start.
-- A janitor enforces retention. Compaction is documented as `webhookd compact`.
+| Domain | Contents | Retention |
+|---|---|---|
+| `q/` | Jobs, payloads, attempts, config snapshots, dedup, timers, and indexes by state, hook+state, hook, and time | Per-hook `retention` |
+| `m/` | Rollups at 1m, 1h and 1d (per-hook counters + 16-bucket log histograms) | 48 h / 90 d / 2 y (~4 MB per 50 hooks) |
+| `ev/` | Event log beyond the 2k in-memory ring | 7 d |
+
+- One file, `-db-path`, holds all three domains.
+- With the `memory` queue backend, `q/` is not created, and the job API shows only jobs since the last start.
+- `/queues`, `/health`, `/events/recent` and the SSE streams are served from memory and never open a transaction.
 
 ---
 
@@ -380,6 +383,6 @@ Nothing in this proposal depends on that one.
 5. **SSE behind proxies.** Proxies can buffer SSE, and browsers limit connections per origin.
    - Mitigation: one multiplexed stream, heartbeats, and `X-Accel-Buffering: no`.
 6. **bbolt constraints.** Only one process can open the file at a time, and the file never shrinks.
-   - Mitigation: fail fast if the file is locked, and document compaction.
+   - Mitigation: fail fast if the file is locked (1 s timeout). Freed pages are reused, so the file stays flat once retention reaches steady state. Offline `webhookd db compact` is available after large purges.
 7. **Upstream divergence from ncarlier/webhookd.**
    - Mitigation: keep the queue and API in isolated packages. The API can be compiled out with `-tags noapi`.
