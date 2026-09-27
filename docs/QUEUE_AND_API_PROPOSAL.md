@@ -70,10 +70,10 @@ No library covers the hard parts anyway:
 | Dependency | Use | Binary Δ |
 |---|---|---|
 | `go.etcd.io/bbolt` | Durable queue store and API data (metrics rollups, event log) | +0.9 MB |
-
-`bolt` is the only durable backend. A zero-dependency spool directory, with one JSON file per job, was considered and dropped. It would duplicate bbolt, which the API needs anyway, and it lacks atomic multi-record updates and indexed lookups by hook, state and time.
 | `cenkalti/backoff/v5` | Backoff with jitter and max elapsed time | ~0 |
 | `golang.org/x/time/rate` | Per-hook rate limit | ~0 |
+
+`bolt` is the only durable backend. A zero-dependency spool directory, with one JSON file per job, was considered and dropped. It would duplicate bbolt, which the API needs anyway, and it lacks atomic multi-record updates and indexed lookups by hook, state and time.
 
 - Direct dependencies go from 2 to 5.
 - The binary goes from 8.2 MB to about 9.2 MB.
