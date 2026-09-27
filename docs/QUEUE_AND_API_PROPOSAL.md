@@ -70,6 +70,8 @@ No library covers the hard parts anyway:
 | Dependency | Use | Binary Δ |
 |---|---|---|
 | `go.etcd.io/bbolt` | Durable queue store and API data (metrics rollups, event log) | +0.9 MB |
+
+`bolt` is the only durable backend. A zero-dependency spool directory, with one JSON file per job, was considered and dropped. It would duplicate bbolt, which the API needs anyway, and it lacks atomic multi-record updates and indexed lookups by hook, state and time.
 | `cenkalti/backoff/v5` | Backoff with jitter and max elapsed time | ~0 |
 | `golang.org/x/time/rate` | Per-hook rate limit | ~0 |
 
@@ -85,7 +87,7 @@ No library covers the hard parts anyway:
 webhook ─► middleware (auth/sig/xff/cors, unchanged) ─► admission ─► Scheduler ─► Runner: Job.Run(ctx, Sink)
                                    429 / 202 / sync       per-hook FIFOs + eligible-      │
                                                           hook heap, rate gate            ▼
-                                        Store: memory (default) | spool | bolt      Broker (per-job seq ring)
+                                        Store: memory (default) | bolt               Broker (per-job seq ring)
                                                                                           │
           pkg/events bus ◄── scheduler, runner, watcher                                   ├─► sync HTTP caller
                                                                                           └─► API log follow (SSE)
@@ -97,13 +99,13 @@ webhook ─► middleware (auth/sig/xff/cors, unchanged) ─► admission ─►
 
 | Package | Responsibility | Est. LOC |
 |---|---|---|
-| `pkg/queue` + `store/{memory,spool,bolt}` | Scheduler, admission, conditions, backoff, broker, recovery, drain | 2.1k |
+| `pkg/queue` + `store/{memory,bolt}` | Scheduler, admission, conditions, backoff, broker, recovery, drain | 1.9k |
 | `pkg/hookcfg` | Layered config: built-in → global → `conditions.d` → sidecar → allowed headers. Validation, mtime cache, snapshots. | 350 |
 | `pkg/events` | Non-blocking event bus, 2k-event ring for SSE resume | 200 |
 | `pkg/watch` | Polling reconciler for scripts and config files | 200 |
 | `pkg/metrics` | Counters and histograms, rollups, Prometheus text output | 400 |
 | `pkg/api/v1` | Read-only API, SSE, API auth, CORS, OpenAPI document | 1.1k |
-| **Total** | | **~4.35k Go** (+ ~3.2k of tests) |
+| **Total** | | **~4.15k Go** (+ ~3.0k of tests) |
 
 **Dispatch**
 - Enqueue signals a `chan struct{}`, and one timer handles the next due retry. Nothing polls.
@@ -175,7 +177,7 @@ webhook ─► middleware (auth/sig/xff/cors, unchanged) ─► admission ─►
 
 ### Global flags (`WHD_*` env equivalents)
 
-- `-queue-backend=memory|spool|bolt`
+- `-queue-backend=memory|bolt`
 - `-queue-path`
 - `-queue-max-size`
 - `-queue-defaults`
@@ -346,7 +348,7 @@ The event bus exists for the API's event stream (`/_api/v1/events`) and for metr
 | 1. Foundations | `Job.Run(ctx, Sink)`, broker, memory store, FIFO scheduler, append-mode logs, persistent IDs, `pkg/events` | None (FIFO only) |
 | 2. Per-hook config | `hookcfg` layers, `conditions.d`, limits/429, TTL/deadline, dedup, concurrency, rate, exec-bit check, watcher | Only for hooks with a sidecar |
 | 3. Retries | Conditions, backoff, dead state, `hook_attempt` env, final-state notifier call | Only when configured |
-| 4. Durability | spool and bolt stores, crash recovery with orphan kill, drain on shutdown | Opt-in via `-queue-backend` |
+| 4. Durability | bolt store, crash recovery with orphan kill, drain on shutdown | Opt-in via `-queue-backend` |
 | 5. Read-only API | `/_api/v1` (all of §6), API listener, auth, CORS, SSE, metrics rollups, OpenAPI, Prometheus | Off unless `-api-addr` is set |
 
 Phases 1–4 are useful on their own. Phase 5 is what the separate portal project depends on.
@@ -374,7 +376,7 @@ Nothing in this proposal depends on that one.
 3. **Semantics change once retries are enabled.** A streamed response cannot reflect later attempts.
    - Mitigation: document this. Final state is available through `X-Hook-Status`, `/_api/v1/jobs/{id}` and log follow.
 4. **Memory backend and history.** With the memory backend, job and metric history is lost on restart.
-   - Mitigation: document this. Use `spool` or `bolt` wherever the API matters.
+   - Mitigation: document this. Use `bolt` wherever the API matters.
 5. **SSE behind proxies.** Proxies can buffer SSE, and browsers limit connections per origin.
    - Mitigation: one multiplexed stream, heartbeats, and `X-Accel-Buffering: no`.
 6. **bbolt constraints.** Only one process can open the file at a time, and the file never shrinks.
